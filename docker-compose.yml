@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "4000:4000"
+    environment:
+      - PORT=4000
+      - NODE_ENV=development
+      - SUPABASE_URL=https://example.supabase.co
+      - SUPABASE_SERVICE_ROLE_KEY=mock-service-role-key
+      - WHATSAPP_VERIFY_TOKEN=mock-verify-token
+      - WHATSAPP_ACCESS_TOKEN=mock-access-token
+      - WHATSAPP_PHONE_NUMBER_ID=mock-phone-id
+      - GEMINI_API_KEY=mock-gemini-key
+    volumes:
+      - ./backend:/usr/src/app
+      - /usr/src/app/node_modules
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+      - PORT=3000
+    depends_on:
+      - backend
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/.next

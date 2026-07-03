@@ -1,256 +1,442 @@
-# Modelo de Base de Datos (Supabase / PostgreSQL)
+# Modelo de Base de Datos - Enterprise Scaffolding
 
-Este documento detalla la estructura física de la base de datos PostgreSQL hospedada en Supabase, incluyendo tipos de datos, relaciones, índices y políticas de seguridad a nivel de fila (Row Level Security - RLS).
+Este documento detalla la estructura física y lógica de la base de datos PostgreSQL hospedada en Supabase para el proyecto **WhatsAppAI**, estructurada tras un riguroso proceso de diseño arquitectónico.
 
 ---
 
-## 1. Diagrama de Relaciones de Entidades (ERD)
+## 1. Diagrama de Relaciones Conceptual (ERD)
 
 ```mermaid
 erDiagram
-    users {
-        uuid id PK
-        string email
-        string role
-        timestamp created_at
-    }
-    clients {
-        uuid id PK
-        string name
-        string whatsapp_phone UK
-        string email
-        timestamp created_at
-    }
-    trips {
-        uuid id PK
-        uuid client_id FK
-        string origin
-        string destination
-        timestamp departure_date
-        string status
-        numeric price
-        timestamp created_at
-    }
-    documents {
-        uuid id PK
-        uuid client_id FK
-        uuid trip_id FK
-        string file_name
-        string storage_path
-        string file_type
-        string ocr_status
-        jsonb extracted_data
-        timestamp created_at
-    }
-    messages {
-        uuid id PK
-        uuid client_id FK
-        string message_direction
-        string message_text
-        string media_url
-        string status
-        timestamp created_at
-    }
-    audit_logs {
-        uuid id PK
-        uuid user_id FK
-        string action
-        string entity_name
-        uuid entity_id
-        jsonb previous_values
-        jsonb new_values
-        timestamp created_at
-    }
+    Company ||--o{ User : "has"
+    Company ||--o{ Client : "manages"
+    Company ||--o{ Driver : "hires"
+    Company ||--o{ Vehicle : "owns"
+    Company ||--o{ Trip : "operates"
+    Company ||--o{ Conversation : "owns"
+    Company ||--o{ Notification : "triggers"
 
-    users ||--o{ audit_logs : "records"
-    clients ||--o{ trips : "books"
-    clients ||--o{ documents : "owns"
-    clients ||--o{ messages : "sends/receives"
-    trips ||--o{ documents : "associates"
+    User }o--o{ Role : "assigned_to"
+    Role }o--o{ Permission : "possesses"
+    User ||--o{ AuditLog : "performs"
+
+    Client ||--o{ Conversation : "initiates"
+    Client ||--o{ Trip : "requests"
+    Client ||--o{ Document : "owns"
+    
+    Driver ||--o{ Trip : "assigned_to"
+    Vehicle ||--o{ Trip : "assigned_to"
+
+    Conversation ||--o{ Message : "contains"
+    Message ||--o| Document : "attaches"
+    Trip ||--o{ Document : "linked_to"
+
+    Document ||--o| OcrProcessing : "undergoes"
+    Document ||--o{ IaExecution : "analyzed_by"
 ```
 
 ---
 
-## 2. Especificación de Tablas
+## 2. Script de Definición de Datos SQL (DDL de Producción)
 
-### 2.1 Tabla `users` (Gestión de Administradores)
-Esta tabla se sincroniza con la autenticación nativa de Supabase (`auth.users`).
-
-| Columna | Tipo | Restricción | Descripción |
-| :--- | :--- | :--- | :--- |
-| `id` | `UUID` | PK, References `auth.users(id)` | Identificador único del usuario / administrador. |
-| `email` | `VARCHAR(255)` | UNIQUE, NOT NULL | Correo electrónico de acceso. |
-| `role` | `VARCHAR(50)` | DEFAULT 'operator' | Rol en la plataforma: `admin`, `operator`. |
-| `created_at` | `TIMESTAMPTZ` | DEFAULT NOW() | Fecha de registro. |
-
-### 2.2 Tabla `clients`
-Registra los clientes que interactúan a través de WhatsApp.
-
-| Columna | Tipo | Restricción | Descripción |
-| :--- | :--- | :--- | :--- |
-| `id` | `UUID` | PK, DEFAULT uuid_generate_v4() | Identificador de cliente. |
-| `name` | `VARCHAR(255)` | NULL | Nombre del cliente (puede extraerse vía IA). |
-| `whatsapp_phone` | `VARCHAR(50)` | UNIQUE, NOT NULL | Número de teléfono de WhatsApp formateado con código de país. |
-| `email` | `VARCHAR(255)` | UNIQUE, NULL | Correo electrónico del cliente. |
-| `created_at` | `TIMESTAMPTZ` | DEFAULT NOW() | Fecha de primer contacto. |
-
-### 2.3 Tabla `trips` (Viajes / Trayectos)
-Representa los viajes solicitados por los clientes y procesados por el operador o por automatización.
-
-| Columna | Tipo | Restricción | Descripción |
-| :--- | :--- | :--- | :--- |
-| `id` | `UUID` | PK, DEFAULT uuid_generate_v4() | Identificador de viaje. |
-| `client_id` | `UUID` | FK, References `clients(id)` | Cliente asociado al viaje. |
-| `origin` | `VARCHAR(255)` | NOT NULL | Ciudad / Lugar de origen del trayecto. |
-| `destination` | `VARCHAR(255)` | NOT NULL | Ciudad / Lugar de destino del trayecto. |
-| `departure_date` | `TIMESTAMPTZ` | NULL | Fecha y hora planificada de salida. |
-| `status` | `VARCHAR(50)` | DEFAULT 'pending' | Estado: `pending`, `confirmed`, `completed`, `cancelled`. |
-| `price` | `NUMERIC(10, 2)` | NULL | Costo acordado del viaje. |
-| `created_at` | `TIMESTAMPTZ` | DEFAULT NOW() | Fecha de registro. |
-
-### 2.4 Tabla `documents` (OCR y Almacenamiento)
-Archivos subidos por los clientes (PDF, PNG, JPG) que contienen pasaportes, contratos o tickets.
-
-| Columna | Tipo | Restricción | Descripción |
-| :--- | :--- | :--- | :--- |
-| `id` | `UUID` | PK, DEFAULT uuid_generate_v4() | Identificador de documento. |
-| `client_id` | `UUID` | FK, References `clients(id)` | Dueño del documento. |
-| `trip_id` | `UUID` | FK, References `trips(id)`, NULL | Viaje al que está asociado. |
-| `file_name` | `VARCHAR(255)` | NOT NULL | Nombre original del archivo. |
-| `storage_path` | `TEXT` | NOT NULL | Ruta de almacenamiento en Supabase Storage bucket. |
-| `file_type` | `VARCHAR(100)` | NOT NULL | MIME Type (p. ej., `application/pdf`, `image/png`). |
-| `ocr_status` | `VARCHAR(50)` | DEFAULT 'pending' | Estado de análisis: `pending`, `processing`, `success`, `failed`. |
-| `extracted_data` | `JSONB` | DEFAULT '{}' | Parámetros extraídos por la IA (p. ej., DNI, nombre, fecha exp). |
-| `created_at` | `TIMESTAMPTZ` | DEFAULT NOW() | Fecha de subida. |
-
-### 2.5 Tabla `messages` (Historial de Mensajes)
-Historial completo de mensajes entrantes y salientes vía WhatsApp.
-
-| Columna | Tipo | Restricción | Descripción |
-| :--- | :--- | :--- | :--- |
-| `id` | `UUID` | PK, DEFAULT uuid_generate_v4() | Identificador de mensaje interno. |
-| `client_id` | `UUID` | FK, References `clients(id)` | Cliente involucrado. |
-| `message_direction` | `VARCHAR(20)` | CHECK (in ('inbound', 'outbound')) | Dirección del mensaje. |
-| `message_text` | `TEXT` | NULL | Contenido de texto del mensaje. |
-| `media_url` | `TEXT` | NULL | URL del archivo adjunto si existiese. |
-| `status` | `VARCHAR(50)` | DEFAULT 'sent' | Estado de entrega: `sent`, `delivered`, `read`, `failed`. |
-| `created_at` | `TIMESTAMPTZ` | DEFAULT NOW() | Fecha de recepción o envío. |
-
-### 2.6 Tabla `audit_logs`
-Bitácora de auditoría detallada de todos los cambios de estado críticos e interacciones de IA.
-
-| Columna | Tipo | Restricción | Descripción |
-| :--- | :--- | :--- | :--- |
-| `id` | `UUID` | PK, DEFAULT uuid_generate_v4() | Identificador de log. |
-| `user_id` | `UUID` | FK, References `users(id)`, NULL | Operador humano responsable. Nulo si es automatización de IA. |
-| `action` | `VARCHAR(100)` | NOT NULL | Tipo de acción: `CREATE_TRIP`, `OCR_EXTRACT`, `IA_REPLY`, etc. |
-| `entity_name` | `VARCHAR(100)` | NOT NULL | Nombre de tabla modificada (p. ej., `trips`, `documents`). |
-| `entity_id` | `UUID` | NOT NULL | ID de la entidad afectada. |
-| `previous_values` | `JSONB` | NULL | Valores anteriores al cambio. |
-| `new_values` | `JSONB` | NULL | Nuevos valores post-cambio. |
-| `created_at` | `TIMESTAMPTZ` | DEFAULT NOW() | Instante de la auditoría. |
-
----
-
-## 3. Scripts de Inicialización SQL (Supabase Migrations)
+Ejecuta este script en el **SQL Editor** de Supabase para inicializar la base de datos con políticas RLS de seguridad, triggers automáticos de auditoría e índices optimizados para el rendimiento de consultas a gran escala.
 
 ```sql
--- Habilitar extensión UUID
+-- ============================================================================
+-- 0. PREPARACIÓN Y EXTENSIONES
+-- ============================================================================
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
--- Tabla de Usuarios Administradores
+-- ============================================================================
+-- 1. TABLAS CORE DE TENANCY (SaaS) Y ACCESO
+-- ============================================================================
+
+-- Tabla de Empresas (Tenants)
+CREATE TABLE public.companies (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(255) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at TIMESTAMPTZ NULL
+);
+
+-- Tabla de Usuarios (Sincronizada con auth.users de Supabase)
 CREATE TABLE public.users (
     id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    company_id UUID NOT NULL REFERENCES public.companies(id) ON DELETE CASCADE,
     email VARCHAR(255) UNIQUE NOT NULL,
-    role VARCHAR(50) DEFAULT 'operator' CHECK (role IN ('admin', 'operator')),
-    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at TIMESTAMPTZ NULL
 );
+
+-- RBAC: Roles
+CREATE TABLE public.roles (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(100) UNIQUE NOT NULL,
+    description TEXT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- RBAC: Permisos
+CREATE TABLE public.permissions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(100) UNIQUE NOT NULL,
+    description TEXT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- RBAC: M:N Roles y Permisos
+CREATE TABLE public.role_permissions (
+    role_id UUID REFERENCES public.roles(id) ON DELETE CASCADE,
+    permission_id UUID REFERENCES public.permissions(id) ON DELETE CASCADE,
+    PRIMARY KEY (role_id, permission_id)
+);
+
+-- RBAC: M:N Usuarios y Roles
+CREATE TABLE public.user_roles (
+    user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    role_id UUID REFERENCES public.roles(id) ON DELETE CASCADE,
+    PRIMARY KEY (user_id, role_id)
+);
+
+-- ============================================================================
+-- 2. TABLAS MAESTRAS (DIRECTORIO DE RECURSOS)
+-- ============================================================================
 
 -- Tabla de Clientes
 CREATE TABLE public.clients (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    name VARCHAR(255),
-    whatsapp_phone VARCHAR(50) UNIQUE NOT NULL,
-    email VARCHAR(255) UNIQUE,
-    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    company_id UUID NOT NULL REFERENCES public.companies(id) ON DELETE CASCADE,
+    name VARCHAR(255) NULL,
+    whatsapp_phone VARCHAR(50) NOT NULL,
+    email VARCHAR(255) NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at TIMESTAMPTZ NULL,
+    CONSTRAINT unique_company_whatsapp UNIQUE (company_id, whatsapp_phone)
 );
+
+-- Tabla de Conductores
+CREATE TABLE public.drivers (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    company_id UUID NOT NULL REFERENCES public.companies(id) ON DELETE CASCADE,
+    name VARCHAR(255) NOT NULL,
+    phone VARCHAR(50) NULL,
+    license_number VARCHAR(100) NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at TIMESTAMPTZ NULL,
+    CONSTRAINT unique_company_license UNIQUE (company_id, license_number)
+);
+
+-- Tabla de Vehículos
+CREATE TABLE public.vehicles (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    company_id UUID NOT NULL REFERENCES public.companies(id) ON DELETE CASCADE,
+    plate_number VARCHAR(50) NOT NULL,
+    brand VARCHAR(100) NULL,
+    model VARCHAR(100) NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at TIMESTAMPTZ NULL,
+    CONSTRAINT unique_company_plate UNIQUE (company_id, plate_number)
+);
+
+-- ============================================================================
+-- 3. TABLAS OPERATIVAS Y DE COMUNICACIÓN
+-- ============================================================================
 
 -- Tabla de Viajes
 CREATE TABLE public.trips (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    client_id UUID REFERENCES public.clients(id) ON DELETE CASCADE NOT NULL,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    company_id UUID NOT NULL REFERENCES public.companies(id) ON DELETE CASCADE,
+    client_id UUID NOT NULL REFERENCES public.clients(id) ON DELETE RESTRICT,
+    driver_id UUID NULL REFERENCES public.drivers(id) ON DELETE SET NULL,
+    vehicle_id UUID NULL REFERENCES public.vehicles(id) ON DELETE SET NULL,
     origin VARCHAR(255) NOT NULL,
     destination VARCHAR(255) NOT NULL,
-    departure_date TIMESTAMPTZ,
-    status VARCHAR(50) DEFAULT 'pending' CHECK (status IN ('pending', 'confirmed', 'completed', 'cancelled')) NOT NULL,
-    price NUMERIC(10, 2),
-    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+    departure_date TIMESTAMPTZ NULL,
+    status VARCHAR(50) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'confirmed', 'completed', 'cancelled')),
+    price NUMERIC(12, 2) NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at TIMESTAMPTZ NULL
 );
 
--- Tabla de Documentos
-CREATE TABLE public.documents (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    client_id UUID REFERENCES public.clients(id) ON DELETE CASCADE NOT NULL,
-    trip_id UUID REFERENCES public.trips(id) ON DELETE SET NULL,
-    file_name VARCHAR(255) NOT NULL,
-    storage_path TEXT NOT NULL,
-    file_type VARCHAR(100) NOT NULL,
-    ocr_status VARCHAR(50) DEFAULT 'pending' CHECK (ocr_status IN ('pending', 'processing', 'success', 'failed')) NOT NULL,
-    extracted_data JSONB DEFAULT '{}'::jsonb NOT NULL,
-    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+-- Tabla de Conversaciones de WhatsApp
+CREATE TABLE public.conversations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    company_id UUID NOT NULL REFERENCES public.companies(id) ON DELETE CASCADE,
+    client_id UUID NOT NULL REFERENCES public.clients(id) ON DELETE CASCADE,
+    channel VARCHAR(50) NOT NULL DEFAULT 'whatsapp',
+    last_message_at TIMESTAMPTZ NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- Tabla de Mensajes
 CREATE TABLE public.messages (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    client_id UUID REFERENCES public.clients(id) ON DELETE CASCADE NOT NULL,
-    message_direction VARCHAR(20) CHECK (message_direction IN ('inbound', 'outbound')) NOT NULL,
-    message_text TEXT,
-    media_url TEXT,
-    status VARCHAR(50) DEFAULT 'sent' CHECK (status IN ('sent', 'delivered', 'read', 'failed')) NOT NULL,
-    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    conversation_id UUID NOT NULL REFERENCES public.conversations(id) ON DELETE CASCADE,
+    whatsapp_message_id VARCHAR(255) NULL UNIQUE,
+    direction VARCHAR(20) NOT NULL CHECK (direction IN ('inbound', 'outbound')),
+    text TEXT NULL,
+    media_url TEXT NULL,
+    media_type VARCHAR(100) NULL,
+    status VARCHAR(50) NOT NULL DEFAULT 'sent' CHECK (status IN ('sent', 'delivered', 'read', 'failed')),
+    error_message TEXT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Tabla de Auditoría
+-- Tabla de Metadatos de Documentos
+CREATE TABLE public.documents (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    company_id UUID NOT NULL REFERENCES public.companies(id) ON DELETE CASCADE,
+    client_id UUID NOT NULL REFERENCES public.clients(id) ON DELETE CASCADE,
+    trip_id UUID NULL REFERENCES public.trips(id) ON DELETE SET NULL,
+    message_id UUID NULL REFERENCES public.messages(id) ON DELETE SET NULL,
+    file_name VARCHAR(255) NOT NULL,
+    storage_path TEXT NOT NULL,
+    file_type VARCHAR(100) NOT NULL,
+    file_size INTEGER NOT NULL,
+    file_hash VARCHAR(64) NOT NULL,
+    status VARCHAR(50) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at TIMESTAMPTZ NULL,
+    CONSTRAINT unique_company_hash UNIQUE (company_id, file_hash)
+);
+
+-- ============================================================================
+-- 4. TABLAS DE PROCESAMIENTO COGNITIVO (OCR & IA)
+-- ============================================================================
+
+-- Tabla de Historial OCR
+CREATE TABLE public.ocr_processings (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    document_id UUID NOT NULL UNIQUE REFERENCES public.documents(id) ON DELETE CASCADE,
+    raw_text TEXT NOT NULL,
+    corrected_text TEXT NULL,
+    confidence NUMERIC(5, 2) NOT NULL,
+    model_used VARCHAR(100) NOT NULL,
+    processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Tabla de Ejecuciones de Inteligencia Artificial (LLMs)
+CREATE TABLE public.ia_executions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    document_id UUID NOT NULL REFERENCES public.documents(id) ON DELETE CASCADE,
+    prompt_template TEXT NOT NULL,
+    response_raw TEXT NOT NULL,
+    response_json JSONB NOT NULL,
+    model_used VARCHAR(100) NOT NULL,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cost NUMERIC(10, 6) NOT NULL DEFAULT 0.000000,
+    execution_time_ms INTEGER NOT NULL DEFAULT 0,
+    status VARCHAR(50) NOT NULL DEFAULT 'success' CHECK (status IN ('success', 'failed')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ============================================================================
+-- 5. TABLAS DE MONITOREO Y LOGS
+-- ============================================================================
+
+-- Alertas y Notificaciones internas del Dashboard
+CREATE TABLE public.notifications (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    company_id UUID NOT NULL REFERENCES public.companies(id) ON DELETE CASCADE,
+    user_id UUID NULL REFERENCES public.users(id) ON DELETE CASCADE,
+    title VARCHAR(255) NOT NULL,
+    content TEXT NOT NULL,
+    type VARCHAR(50) NOT NULL,
+    is_read BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Tabla de Logs de Auditoría Inmutables
 CREATE TABLE public.audit_logs (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    user_id UUID REFERENCES public.users(id) ON DELETE SET NULL,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    company_id UUID NULL REFERENCES public.companies(id) ON DELETE SET NULL,
+    user_id UUID NULL REFERENCES public.users(id) ON DELETE SET NULL,
     action VARCHAR(100) NOT NULL,
-    entity_name VARCHAR(100) NOT NULL,
-    entity_id UUID NOT NULL,
-    previous_values JSONB,
-    new_values JSONB,
-    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+    table_name VARCHAR(100) NOT NULL,
+    record_id UUID NOT NULL,
+    previous_values JSONB NULL,
+    new_values JSONB NULL,
+    ip_address VARCHAR(45) NULL,
+    user_agent TEXT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Crear Índices para Optimizar Búsquedas
-CREATE INDEX idx_clients_whatsapp ON public.clients(whatsapp_phone);
-CREATE INDEX idx_trips_client ON public.trips(client_id);
-CREATE INDEX idx_documents_client ON public.documents(client_id);
-CREATE INDEX idx_messages_client ON public.messages(client_id);
-CREATE INDEX idx_audit_entity ON public.audit_logs(entity_name, entity_id);
+-- ============================================================================
+-- 6. ÍNDICES DE RENDIMIENTO Y ESCALABILIDAD
+-- ============================================================================
 
--- Configuración de Row Level Security (RLS)
+-- RLS & Tenancy Performance Indexes
+CREATE INDEX idx_users_company ON public.users(company_id);
+CREATE INDEX idx_clients_company ON public.clients(company_id);
+CREATE INDEX idx_drivers_company ON public.drivers(company_id);
+CREATE INDEX idx_vehicles_company ON public.vehicles(company_id);
+CREATE INDEX idx_trips_company ON public.trips(company_id);
+CREATE INDEX idx_documents_company ON public.documents(company_id);
+CREATE INDEX idx_conversations_company ON public.conversations(company_id);
+CREATE INDEX idx_notifications_company ON public.notifications(company_id);
+CREATE INDEX idx_audit_logs_company ON public.audit_logs(company_id);
+
+-- Business Flow Optimization Indexes
+CREATE INDEX idx_clients_phone_company ON public.clients(company_id, whatsapp_phone);
+CREATE INDEX idx_trips_company_status_created ON public.trips(company_id, status, created_at DESC);
+CREATE INDEX idx_documents_company_status ON public.documents(company_id, status);
+CREATE INDEX idx_documents_hash_company ON public.documents(company_id, file_hash);
+CREATE INDEX idx_messages_conversation_created ON public.messages(conversation_id, created_at DESC);
+CREATE INDEX idx_audit_logs_record_created ON public.audit_logs(table_name, record_id, created_at DESC);
+
+-- ============================================================================
+-- 7. TRIGGERS AUTOMATIZADOS (UPDATED_AT Y AUDITORÍA PL/PGSQL)
+-- ============================================================================
+
+-- Función Reutilizable para campos 'updated_at'
+CREATE OR REPLACE FUNCTION public.set_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Vinculación de Trigger set_updated_at
+CREATE TRIGGER tg_companies_updated_at BEFORE UPDATE ON public.companies FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+CREATE TRIGGER tg_users_updated_at BEFORE UPDATE ON public.users FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+CREATE TRIGGER tg_roles_updated_at BEFORE UPDATE ON public.roles FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+CREATE TRIGGER tg_clients_updated_at BEFORE UPDATE ON public.clients FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+CREATE TRIGGER tg_drivers_updated_at BEFORE UPDATE ON public.drivers FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+CREATE TRIGGER tg_vehicles_updated_at BEFORE UPDATE ON public.vehicles FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+CREATE TRIGGER tg_trips_updated_at BEFORE UPDATE ON public.trips FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+CREATE TRIGGER tg_conversations_updated_at BEFORE UPDATE ON public.conversations FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+CREATE TRIGGER tg_documents_updated_at BEFORE UPDATE ON public.documents FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+-- Función Genérica y Defensiva de Auditoría PL/pgSQL
+CREATE OR REPLACE FUNCTION public.audit_trigger_fn()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_old_values JSONB := NULL;
+    v_new_values JSONB := NULL;
+    v_company_id UUID := NULL;
+    v_user_id UUID := NULL;
+BEGIN
+    -- Capturar datos del usuario autenticado en la sesión de Supabase Auth
+    BEGIN
+        v_user_id := auth.uid();
+        v_company_id := (auth.jwt() -> 'user_metadata' ->> 'company_id')::uuid;
+    EXCEPTION WHEN OTHERS THEN
+        -- Fallback si se ejecuta fuera de una sesión de cliente Supabase
+    END;
+
+    IF (TG_OP = 'UPDATE') THEN
+        v_old_values := to_jsonb(OLD);
+        v_new_values := to_jsonb(NEW);
+        
+        IF (v_old_values ? 'company_id') THEN
+            v_company_id := (v_old_values ->> 'company_id')::uuid;
+        END IF;
+
+        INSERT INTO public.audit_logs (company_id, user_id, action, table_name, record_id, previous_values, new_values)
+        VALUES (v_company_id, v_user_id, 'UPDATE', TG_TABLE_NAME, OLD.id, v_old_values, v_new_values);
+        RETURN NEW;
+    ELSIF (TG_OP = 'INSERT') THEN
+        v_new_values := to_jsonb(NEW);
+
+        IF (v_new_values ? 'company_id') THEN
+            v_company_id := (v_new_values ->> 'company_id')::uuid;
+        END IF;
+
+        INSERT INTO public.audit_logs (company_id, user_id, action, table_name, record_id, previous_values, new_values)
+        VALUES (v_company_id, v_user_id, 'INSERT', TG_TABLE_NAME, NEW.id, NULL, v_new_values);
+        RETURN NEW;
+    ELSIF (TG_OP = 'DELETE') THEN
+        v_old_values := to_jsonb(OLD);
+
+        IF (v_old_values ? 'company_id') THEN
+            v_company_id := (v_old_values ->> 'company_id')::uuid;
+        END IF;
+
+        INSERT INTO public.audit_logs (company_id, user_id, action, table_name, record_id, previous_values, new_values)
+        VALUES (v_company_id, v_user_id, 'DELETE', TG_TABLE_NAME, OLD.id, v_old_values, NULL);
+        RETURN OLD;
+    END IF;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Activar Trigger de Auditoría en Tablas Clave
+CREATE TRIGGER tg_trips_audit AFTER INSERT OR UPDATE OR DELETE ON public.trips FOR EACH ROW EXECUTE FUNCTION public.audit_trigger_fn();
+CREATE TRIGGER tg_documents_audit AFTER INSERT OR UPDATE OR DELETE ON public.documents FOR EACH ROW EXECUTE FUNCTION public.audit_trigger_fn();
+CREATE TRIGGER tg_drivers_audit AFTER INSERT OR UPDATE OR DELETE ON public.drivers FOR EACH ROW EXECUTE FUNCTION public.audit_trigger_fn();
+CREATE TRIGGER tg_vehicles_audit AFTER INSERT OR UPDATE OR DELETE ON public.vehicles FOR EACH ROW EXECUTE FUNCTION public.audit_trigger_fn();
+
+-- ============================================================================
+-- 8. POLÍTICAS DE SEGURIDAD ROW LEVEL SECURITY (RLS)
+-- ============================================================================
+
+-- Habilitar RLS en todas las tablas operativas
+ALTER TABLE public.companies ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.clients ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.drivers ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.vehicles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.trips ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.documents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.conversations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.messages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.documents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.ocr_processings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.ia_executions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.notifications ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.audit_logs ENABLE ROW LEVEL SECURITY;
 
--- Políticas base: Solo personal autenticado de Supabase puede leer y escribir
-CREATE POLICY "Permitir todo a usuarios autenticados" ON public.clients
-    FOR ALL USING (auth.role() = 'authenticated');
+-- Políticas de aislamiento basadas en claims de JWT
+CREATE POLICY "RLS Aislamiento de Compañía" ON public.users FOR ALL TO authenticated
+    USING (company_id = ((auth.jwt() -> 'user_metadata'::text) ->> 'company_id'::text)::uuid);
 
-CREATE POLICY "Permitir todo a usuarios autenticados" ON public.trips
-    FOR ALL USING (auth.role() = 'authenticated');
+CREATE POLICY "RLS Aislamiento de Compañía" ON public.clients FOR ALL TO authenticated
+    USING (company_id = ((auth.jwt() -> 'user_metadata'::text) ->> 'company_id'::text)::uuid);
 
-CREATE POLICY "Permitir todo a usuarios autenticados" ON public.documents
-    FOR ALL USING (auth.role() = 'authenticated');
+CREATE POLICY "RLS Aislamiento de Compañía" ON public.drivers FOR ALL TO authenticated
+    USING (company_id = ((auth.jwt() -> 'user_metadata'::text) ->> 'company_id'::text)::uuid);
 
-CREATE POLICY "Permitir todo a usuarios autenticados" ON public.messages
-    FOR ALL USING (auth.role() = 'authenticated');
+CREATE POLICY "RLS Aislamiento de Compañía" ON public.vehicles FOR ALL TO authenticated
+    USING (company_id = ((auth.jwt() -> 'user_metadata'::text) ->> 'company_id'::text)::uuid);
 
-CREATE POLICY "Permitir todo a usuarios autenticados" ON public.audit_logs
-    FOR ALL USING (auth.role() = 'authenticated');
+CREATE POLICY "RLS Aislamiento de Compañía" ON public.trips FOR ALL TO authenticated
+    USING (company_id = ((auth.jwt() -> 'user_metadata'::text) ->> 'company_id'::text)::uuid);
+
+CREATE POLICY "RLS Aislamiento de Compañía" ON public.conversations FOR ALL TO authenticated
+    USING (company_id = ((auth.jwt() -> 'user_metadata'::text) ->> 'company_id'::text)::uuid);
+
+CREATE POLICY "RLS Aislamiento de Compañía" ON public.documents FOR ALL TO authenticated
+    USING (company_id = ((auth.jwt() -> 'user_metadata'::text) ->> 'company_id'::text)::uuid);
+
+CREATE POLICY "RLS Aislamiento de Compañía" ON public.notifications FOR ALL TO authenticated
+    USING (company_id = ((auth.jwt() -> 'user_metadata'::text) ->> 'company_id'::text)::uuid);
+
+CREATE POLICY "RLS Aislamiento de Compañía" ON public.audit_logs FOR ALL TO authenticated
+    USING (company_id = ((auth.jwt() -> 'user_metadata'::text) ->> 'company_id'::text)::uuid);
+
+-- Políticas RLS especiales para mensajes y procesamiento vinculados indirectamente
+CREATE POLICY "RLS Mensajes Aislados" ON public.messages FOR ALL TO authenticated
+    USING (conversation_id IN (
+        SELECT id FROM public.conversations WHERE company_id = ((auth.jwt() -> 'user_metadata'::text) ->> 'company_id'::text)::uuid
+    ));
+
+CREATE POLICY "RLS OCR Aislado" ON public.ocr_processings FOR ALL TO authenticated
+    USING (document_id IN (
+        SELECT id FROM public.documents WHERE company_id = ((auth.jwt() -> 'user_metadata'::text) ->> 'company_id'::text)::uuid
+    ));
+
+CREATE POLICY "RLS IA Aislado" ON public.ia_executions FOR ALL TO authenticated
+    USING (document_id IN (
+        SELECT id FROM public.documents WHERE company_id = ((auth.jwt() -> 'user_metadata'::text) ->> 'company_id'::text)::uuid
+    ));
 ```

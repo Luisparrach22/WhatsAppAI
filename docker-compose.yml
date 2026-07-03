@@ -22,7 +22,7 @@ services:
 
   frontend:
     build:
-      context: .
+      context: ./frontend
       dockerfile: Dockerfile
     ports:
       - "3000:3000"
@@ -32,6 +32,6 @@ services:
     depends_on:
       - backend
     volumes:
-      - .:/app
+      - ./frontend:/app
       - /app/node_modules
       - /app/.next
